@@ -573,13 +573,14 @@ static void configure_gpio(void)
 		LOG_ERR("Cannot init LEDs (err: %d)", err);
 	}
 }
-
-void send_int_over_bluetooth(int value) {
+//array with both voltages, say which voltage is for which pin, also say mV
+void send_int_over_bluetooth(int32_t value) {
 
     struct uart_data_t *buf = k_malloc(sizeof(struct uart_data_t));
 
     char str_value[10];
-    snprintf(str_value, sizeof(str_value), "%d", value);
+    snprintf(str_value, sizeof(str_value), "%d mV", value);
+
     buf->len = strlen(str_value);
     memcpy(buf->data, str_value, buf->len);
 
@@ -590,7 +591,44 @@ void send_int_over_bluetooth(int value) {
     k_free(buf);
 }
 
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/zephyr.h>
+#include <zephyr/drivers/adc.h>
 
+// Define your ADC related parameters
+#define SLEEP_TIME_MS   1000
+
+#define ADC_NODE DT_NODELABEL(adc)
+static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
+
+
+#define ADC_RESOLUTION 10
+#define ADC_CHANNEL 0
+#define ADC_PORT        SAADC_CH_PSELP_PSELP_AnalogInput0 // AIN0
+#define ADC_REFERENCE       ADC_REF_INTERNAL        // 0.6V
+#define ADC_GAIN   ADC_GAIN_1_5     // ADC_REFERENCE*5
+
+
+struct adc_channel_cfg adc_channel_cfg = {
+    .gain = ADC_GAIN,
+    .reference = ADC_REFERENCE,
+    .acquisition_time = ADC_ACQ_TIME_DEFAULT,
+    .channel_id = ADC_CHANNEL,
+#ifdef CONFIG_ADC_NRFX_SAADC
+    .input_positive = ADC_PORT
+#endif
+};
+
+int16_t sample_buffer[1];
+struct adc_sequence sequence = {
+    .channels = BIT(ADC_CHANNEL),
+    .buffer = sample_buffer,
+    .buffer_size = sizeof(sample_buffer), // buffer size in bytes
+    .resolution = ADC_RESOLUTION
+};
 
 
 
@@ -650,20 +688,50 @@ int main(void)
 
 	int value = 1;
 
-	for (;;) {
+	    if (!device_is_ready(adc_dev)) {
+        printk("adc_dev not ready\n");
+        return 0;
+    }
 
+    err = adc_channel_setup(adc_dev, &adc_channel_cfg);
+    if (err != 0) {
+        printk("ADC adc_channel_setup failed with error %d. \n", err);
+        return 0;
+    }
 
+	while(1) {
+
+		//send buffer of data
+
+        int32_t mv_value = sample_buffer[0];
+        printk("ADC-Value: %d \n", mv_value);
+
+        int32_t adc_vref = adc_ref_internal(adc_dev);
+        adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &mv_value);
+
+		send_int_over_bluetooth(mv_value);
+
+        printk("ADC-Voltage: %d mV\n", mv_value);
+
+        k_msleep(SLEEP_TIME_MS);
 
 		value = value + 1;
 
     
-        send_int_over_bluetooth(value);
-        k_sleep(K_MSEC(1000)); 
-    
 		
 		dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
 		k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+
+
+		err = adc_read(adc_dev, &sequence);
+        if (err != 0) {
+            printk("ADC reading failed with error %d. \n", err);
+            return 0;
+        }
+
+
 	}
+	return 0;
 }
 
 
